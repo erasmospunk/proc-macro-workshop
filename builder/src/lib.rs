@@ -50,6 +50,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
                                 if let Lit::Str(name) = &m.lit {
                                     attribute = Some(format_ident!("{}", name.value()));
                                 }
+                            } else {
+                                return syn::Error::new_spanned(
+                                    &meta,
+                                    "expected `builder(each = \"...\")`"
+                                ).to_compile_error().into();
                             }
                         }
                     }

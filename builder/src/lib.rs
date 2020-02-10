@@ -2,17 +2,21 @@
 
 extern crate proc_macro;
 
-use proc_macro::TokenStream;
-use syn::{parse_macro_input, parse_quote, DeriveInput, DataStruct, Data, Fields, FieldsNamed, Type, Field};
-use quote::{quote, quote_spanned, format_ident};
+use proc_macro::{TokenStream};
+use proc_macro2::Ident;
 
-#[proc_macro_derive(Builder)]
+use quote::{quote, quote_spanned, format_ident};
+use syn::*;
+use syn::punctuated::Punctuated;
+use syn::token::Comma;
+
+#[proc_macro_derive(Builder, attributes(builder))]
 pub fn derive(input: TokenStream) -> TokenStream {
-    let mut input: DeriveInput = parse_macro_input!(input as DeriveInput);
+    let input: DeriveInput = parse_macro_input!(input as DeriveInput);
     let cmd = &input.ident;
     let cmd_builder = format_ident!("{}Builder", cmd);
 
-    let fields: Vec<(&mut Field, bool)> = if let Data::Struct(
+    let fields: Vec<(Field, bool, Option<Ident>)> = if let Data::Struct(
         DataStruct{
             struct_token: _,
             fields: Fields::Named(
@@ -22,7 +26,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             ),
             semi_token: _
-        }) = &mut input.data
+        }) = input.data
     {
         let mut fields_tokens = Vec::with_capacity(named.len());
         for field in named {
@@ -34,41 +38,90 @@ pub fn derive(input: TokenStream) -> TokenStream {
                     !p.path.segments.is_empty() && p.path.segments[0].ident == "Option",
                 _ => false,
             };
+
+            // Find if attributes are present
+            let mut attribute: Option<Ident> = None;
+            for attr in &field.attrs {
+                if let Ok(Meta::List(meta)) = attr.parse_meta() {
+                    if !meta.path.is_ident("builder") { continue; }
+                    if meta.nested.len() == 1 {
+                        if let NestedMeta::Meta(Meta::NameValue(m)) = &meta.nested[0] {
+                            if m.path.is_ident("each") {
+                                if let Lit::Str(name) = &m.lit {
+                                    attribute = Some(format_ident!("{}", name.value()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut field: Field = field.clone();
             // For non optional fields, wrap them in Option
             if !optional {
-                let option_ty: Type = parse_quote! {Option<#ty>};
-                field.ty = option_ty;
+                field.ty = parse_quote! {Option<#ty>};
             }
-            fields_tokens.push((field, optional))
+            // Clear attributes
+            field.attrs.clear();
+            fields_tokens.push((field, optional, attribute))
         }
         fields_tokens
     } else {
         unimplemented!("Unexpected structure format");
     };
 
-    let fields_tokens = fields.iter().map(|(f, _)| f);
+    let fields_tokens = fields.iter().map(|(f, _, _)| f);
     let cmd_builder_struct = quote! {
         pub struct #cmd_builder {
             #(#fields_tokens),*
         }
     };
 
-    let fields_init_none = fields.iter().map(|(f, _)| {
+    let fields_init_none = fields.iter().map(|(f, _, each)| {
         let i = f.ident.as_ref().unwrap();
-        quote_spanned!(i.span() => #i: None)
+        if each.is_none() {
+            quote_spanned!(i.span() => #i: None)
+        } else {
+            // When dealing with `each` variants assume a vec
+            quote_spanned!(i.span() => #i: Some(Vec::new()))
+        }
     });
 
-//    let cmd_builder_setters = fields.iter().map(|(f, _)| {
-//        let i = f.ident.as_ref().unwrap();
-//        // TODO extract T from Option<T>
-//        let t = &f.ty;
-//        quote_spanned!(i.span() => fn #i(&mut self, #i: #t) -> &mut Self {
-//            self.#i = Some(#i);
-//            self
-//        })
-//    });
+    let cmd_builder_setters = fields.iter().map(|(f, _, each)| {
+        let i = f.ident.as_ref().unwrap();
+        // Extract T from Option<T>
+        let t = extract_inner_type(&f.ty, "Option".into());
 
-    let build_commands = fields.iter().map(|(f, opt)| {
+        let one_at_a_time_method = if let Some(new_i) = each {
+            if let GenericArgument::Type(t) = &t[0] {
+                // Extract T from Vec<T>
+                let new_t = extract_inner_type(t, "Vec".into());
+                Some(quote_spanned!(i.span() => fn #new_i(&mut self, #new_i: #new_t) -> &mut Self {
+                    if self.#i.is_none() {
+                        self.#i = Some(Vec::new());
+                    }
+                    self.#i.as_mut().unwrap().push(#new_i);
+                    self
+                }))
+            } else { None }
+        } else { None };
+
+        // Generate the normal methods if no `each` attribute is provided OR if the attribute name
+        // differs from the structs' member name.
+        let all_at_once_method = if each.is_none() || each.as_ref().unwrap() != i {
+            quote_spanned!(i.span() => fn #i(&mut self, #i: #t) -> &mut Self {
+                self.#i = Some(#i);
+                self
+            })
+        } else { quote! {} };
+
+        quote! {
+            #one_at_a_time_method
+            #all_at_once_method
+        }
+    });
+
+    let build_commands = fields.iter().map(|(f, opt, _)| {
         let i = f.ident.as_ref().unwrap();
         if *opt {
             quote_spanned!(i.span() => #i: self.#i.clone())
@@ -87,24 +140,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
         impl #cmd_builder {
-//            #(#cmd_builder_setters)*
-
-            fn executable(&mut self, executable: String) -> &mut Self {
-                self.executable = Some(executable);
-                self
-            }
-            fn args(&mut self, args: Vec<String>) -> &mut Self {
-                self.args = Some(args);
-                self
-            }
-            fn env(&mut self, env: Vec<String>) -> &mut Self {
-                self.env = Some(env);
-                self
-            }
-            fn current_dir(&mut self, current_dir: String) -> &mut Self {
-                self.current_dir = Some(current_dir);
-                self
-            }
+            #(#cmd_builder_setters)*
 
             pub fn build(&mut self) -> Result<#cmd, Box<dyn Error>> {
                 Ok(#cmd {
@@ -123,4 +159,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
     };
 
     tokens.into()
+}
+
+fn extract_inner_type(ty: &Type, outer_id: String) -> &Punctuated<GenericArgument, Comma> {
+    match ty {
+        Type::Path(p) => {
+            assert_eq!(p.path.segments[0].ident, outer_id);
+            match &p.path.segments[0].arguments {
+                PathArguments::AngleBracketed(a) => {
+                    &a.args
+                },
+                _ => unimplemented!(),
+            }
+        },
+        _ => unimplemented!(),
+    }
 }

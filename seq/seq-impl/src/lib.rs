@@ -6,8 +6,28 @@ use proc_macro_hack::proc_macro_hack;
 #[derive(Debug)]
 struct Sequence {
     variable: syn::Ident,
-    range: core::ops::Range<usize>,
+    range: SequenceRange,
     body: proc_macro2::TokenStream,
+}
+
+#[derive(Debug)]
+struct SequenceRange {
+    start: usize,
+    end: usize,
+    inclusive: bool,
+}
+
+impl SequenceRange {
+    fn iter(&self) -> Box<dyn std::iter::Iterator<Item = usize>> {
+        if self.inclusive {
+            std::boxed::Box::new(std::ops::RangeInclusive::new(self.start, self.end))
+        } else {
+            std::boxed::Box::new(std::ops::Range {
+                start: self.start,
+                end: self.end,
+            })
+        }
+    }
 }
 
 impl syn::parse::Parse for Sequence {
@@ -15,9 +35,16 @@ impl syn::parse::Parse for Sequence {
         let variable = input.parse::<syn::Ident>()?;
         input.parse::<syn::Token![in]>()?;
         let start = input.parse::<syn::LitInt>()?.base10_parse()?;
-        input.parse::<syn::Token![..]>()?;
+        let range_type = input.parse::<syn::RangeLimits>()?;
         let end = input.parse::<syn::LitInt>()?.base10_parse()?;
-        let range = core::ops::Range { start, end };
+        let range = SequenceRange {
+            start,
+            end,
+            inclusive: match range_type {
+                syn::RangeLimits::HalfOpen(_) => false,
+                syn::RangeLimits::Closed(_) => true,
+            },
+        };
         let content: syn::parse::ParseBuffer;
         syn::braced!(content in input);
         let body = content.parse()?;
@@ -62,7 +89,7 @@ fn seq_process_tokens(sequence: Sequence) -> proc_macro2::TokenStream {
 fn process_tokens(
     tokens: proc_macro2::TokenStream,
     variable: &syn::Ident,
-    range: &core::ops::Range<usize>,
+    range: &SequenceRange,
 ) -> (proc_macro2::TokenStream, bool) {
     let mut had_repeat_section = false;
     let mut tokens_out = std::vec::Vec::with_capacity(16);
@@ -96,11 +123,11 @@ fn process_tokens(
 fn loop_block(
     block: proc_macro2::TokenStream,
     variable: &syn::Ident,
-    range: &core::ops::Range<usize>,
+    range: &SequenceRange,
 ) -> proc_macro2::TokenStream {
     let mut output = proc_macro2::TokenStream::new();
     // Iterate over the range and replace all instances of `variable`
-    for n in range.clone() {
+    for n in range.iter() {
         let replaced = replace_with(block.clone(), &variable, n);
         output.extend(replaced);
     }

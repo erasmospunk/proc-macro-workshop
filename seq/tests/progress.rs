@@ -8,7 +8,7 @@ fn tests() {
     t.pass("tests/05-repeat-section.rs");
     t.pass("tests/06-make-work-in-function.rs");
     t.pass("tests/07-init-array.rs");
-    //t.pass("tests/08-inclusive-range.rs");
+    t.pass("tests/08-inclusive-range.rs");
     //t.compile_fail("tests/09-ident-span.rs");
     //t.pass("tests/10-interaction-with-macrorules.rs");
 }

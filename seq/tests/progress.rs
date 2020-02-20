@@ -10,5 +10,5 @@ fn tests() {
     t.pass("tests/07-init-array.rs");
     t.pass("tests/08-inclusive-range.rs");
     t.compile_fail("tests/09-ident-span.rs");
-    //t.pass("tests/10-interaction-with-macrorules.rs");
+    t.pass("tests/10-interaction-with-macrorules.rs");
 }
